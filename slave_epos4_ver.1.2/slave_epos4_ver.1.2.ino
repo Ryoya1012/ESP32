@@ -1,5 +1,6 @@
 // Experimental machibe Ver.3.0
 //2025-03-06
+//cheak 2025-03-07
 //Author Ryoya SATO
 
 #include <Arduino.h>
@@ -127,6 +128,7 @@ void receiveCANMessage() {
 
 void init_HX711()
 {
+  reader.begin();
   while( reader.read() != 0)
   {
     Serial.println("Failed initial reading... Retry.");
@@ -609,12 +611,12 @@ void read_Tension() //電源部分の接続、モジュールの接触が悪い
   {
     float gram = parser.parseToGram(reader.values[i]) - offsetGrams[i];
     float newtons = gram * 0.00981 * calibrationFactors[i];
-    tensionValues[i] = gram; //配列に格納
-
+    tensionValues[i] = newtons; //配列に格納
   }
-  Serial1.print("Tenison0:");
+  
+  Serial1.print("sensor0:");
   Serial1.print(tensionValues[0]);
   Serial1.print(",");
-  Serial1.print("Tension1:");
+  Serial1.print("sensor1:");
   Serial1.println(tensionValues[1]);
 }
