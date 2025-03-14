@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <HX711_asukiaaa.h>  // 正しいライブラリ名を確認
+#include <HX711_Git.h>
 
 int pinsDout[] = { 21, 32};
 const int numPins = sizeof( pinsDout) / sizeof( pinsDout[0]);
@@ -26,7 +26,7 @@ HX711_asukiaaa::Reader reader(pinsDout, numPins, pinSlk);
 HX711_asukiaaa::Parser parser(LOAD_CELL_RATED_VOLT, LOAD_CELL_RATED_GRAM, HX711_R1, HX711_R2);
 float offsetGrams[numPins];
 
-float calibrationFactors[numPins] = { 1, 1}; //各センサに対する校正係数
+float calibrationFactors[numPins] = { 208.4486, 205.6171}; //各センサに対する校正係数
 
 void setup() {
   Serial.begin(115200);
@@ -56,5 +56,5 @@ void loop() {
   output.trim(); //最後の余分な空白を削除
   output.remove( output.length() - 1); //最後のカンマを削除
   Serial.println(output);
-  delay(10);
+  delay(5);
 }

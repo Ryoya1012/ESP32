@@ -1,22 +1,30 @@
-// Experimental machibe Ver.3.0
-//2025-03-06
-//cheak 2025-03-07
+//Experimental machine Ver.3.0
+//2025-03-14
 //Author Ryoya SATO
 
 #include <Arduino.h>
 #include "driver/twai.h"
 #include "CAN_library.h"
-#include <HX711_asukiaaa.h>
+#include <HX711_Git.h>
 
-hw_timer_t *timer = NULL;
-portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
-volatile bool timer_flag = false;
-
-//マルチスレッドのタスクハンドル格納
-TaskHandle_t Process[1];
-
+//CAN通信用ピン
 #define RX_PIN 4
 #define TX_PIN 5
+
+unsigned long previousMillis = 0;
+const long interval = 10;  // 1秒=1000ms
+
+//マルチスレッドのタスクハンドル格納
+TaskHandle_t Process[2];
+
+//グローバル変数
+uint16_t processed_current1 = 0;
+uint16_t processed_current2 = 0;
+float tensionValues[2];
+float tensionValues1[2];
+char lan;
+int mode = 0;
+int Setup = 0;
 
 //LED_setup
 int LED1 = 25;
@@ -24,40 +32,14 @@ int LED2 = 13;
 int LED3 = 26;
 int LED4 = 12;
 
-unsigned long previousMillis = 0;
-const long interval = 10;
-
-// CANメッセージデータ構造体
-struct CurrentData {
-  uint8_t data[5];
-};
-
-// 現在のデータ
-CurrentData Read_Current1;
-CurrentData Read_Current2;
-
-uint16_t current_1, current_2;
-uint16_t processed_current1=1, processed_current2=1;
-unsigned long lastSendTime = 0;
-
-char lan;
-int mode = 0;
-int Setup = 0;
-
+//HX711関係
 int pinsDout[] = { 21, 32};
 const int numPins = sizeof( pinsDout) / sizeof( pinsDout[0]) ;
 int pinSlk = 22;
 HX711_asukiaaa::Reader reader( pinsDout, numPins, pinSlk);
-String output = "";
-
-
-//センサデータを格納するバッファ
-float tensionValues[4];
-float tensionValues1[4];
 
 #define LOAD_CELL_RATED_VOLT 0.0075f
 #define LOAD_CELL_RATED_GRAM 10000.0f
-
 //入力抵抗調整
 #define HX711_R1 1000.0
 
@@ -69,7 +51,8 @@ float offsetGrams[numPins];
 float calibrationFactors[numPins] = { 208.4486, 205.6171}; //各センサに対する校正係数
 
 // CANの初期化
-void initCAN() {
+void initCAN() 
+{
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
    // twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -102,28 +85,33 @@ void ledsetup()
   pinMode( LED4, OUTPUT);
 }
 
-// CANメッセージ送信
-void send_CAN_message(uint32_t id, uint8_t *data, uint8_t len) {
-    twai_message_t message;
-    message.identifier = id;
-    message.extd = 0;
-    message.data_length_code = len;
-    memcpy(message.data, data, len);
-    
-    if (twai_transmit(&message, pdMS_TO_TICKS(10)) != ESP_OK) {
-        Serial.println("CAN送信失敗");
-    }
+void init_HX711() //どうにかして即応性をあげたい
+{
+  reader.begin();
+  /*
+  while( reader.read() != 0)
+  {
+    Serial.println("Failed initial reading... Retry.");
+    delay(100);
+  }
+  */
+  //オフセット処理
+  for( int i = 0; i < reader.doutLen; i++)
+  {
+    offsetGrams[i] = parser.parseToGram( reader.values[i]);
+  }
 }
 
 // CANメッセージ受信
-void receiveCANMessage() {
+void receiveCANMessage() 
+{
     twai_message_t message;
     esp_err_t res;
 
     // 受信可能なデータがある限り処理する
     while ((res = twai_receive(&message, 10 / portTICK_PERIOD_MS)) == ESP_OK) {
 
-        // データ長チェック (2バイトのデータのみを対象)
+        // データ長チェック (4バイトのデータのみを対象)
         if (message.data_length_code == 4) {
            uint32_t received_value = (int32_t)(message.data[0] << 24) | (message.data[1] << 16) | (message.data[3] << 8) | message.data[0];
 
@@ -138,7 +126,7 @@ void receiveCANMessage() {
                     // その他のIDを無視する
                     break;
             }
-
+          //   Serial.printf("Current1: %d, Current2: %d\n",processed_current1, processed_current2);
         }
 
         // バッファをクリア (次の受信に備える)
@@ -146,69 +134,103 @@ void receiveCANMessage() {
     }
 }
 
-void init_HX711()
+// CANメッセージ送信
+void send_CAN_message(uint32_t id, uint8_t *data, uint8_t len) 
 {
-  reader.begin();
-  while( reader.read() != 0)
+    twai_message_t message;
+    message.identifier = id;
+    message.extd = 0;
+    message.data_length_code = len;
+    memcpy(message.data, data, len);
+    
+    if (twai_transmit(&message, pdMS_TO_TICKS(10)) != ESP_OK) {
+        Serial.println("CAN送信失敗");
+    }
+}
+
+void setup() 
+{
+  Serial.begin( 500000);
+  Serial1.begin( 115200, SERIAL_8N1, 18, 19);
+  init_HX711();
+  delay(500);
+  initCAN();
+  ledsetup();
+  xTaskCreatePinnedToCore( handleUARTTask, "UART Task", 8192, NULL, 4,  &Process[0], 0);
+  xTaskCreatePinnedToCore( handleLoadcellTask, "Loadcell Task", 8192, NULL, 3,  &Process[1], 1);
+  xTaskCreatePinnedToCore( SerialplotTask, "Serial plot Task", 4096, NULL, 2,  &Process[2], 1);
+  delay(500);
+  NMTPRE();
+  digitalWrite( LED1, HIGH);
+  delay(500);
+  NMTOP();
+  digitalWrite( LED2, HIGH);
+  delay(500);
+  Setup = 1;
+}
+
+void loop() //PRO_CORE Thread1(動確済み)
+{
+  unsigned long currentMillis = millis();
+  if(Setup)
   {
-    Serial.println("Failed initial reading... Retry.");
-    delay(500);
-  }
-  //オフセット処理
-  for( int i = 0; i < reader.doutLen; i++)
-  {
-    offsetGrams[i] = parser.parseToGram( reader.values[i]);
+    if(currentMillis - previousMillis >= interval)
+    {
+      sendTHE_P_Read1();
+      sendTHE_C_Read2();
+      receiveCANMessage();
+    }
   }
 }
 
-void setup() {
-    Serial.begin( 500000);
-    Serial1.begin( 115200, SERIAL_8N1, 18, 19);
-    init_HX711();
-    ledsetup();
-
-    xTaskCreatePinnedToCore( LoadCell, "LoadCell", 10000, NULL, 0, &Process[0], 0);
-    //タスクを作成
-    initCAN();
-    delay(500);
-    NMTPRE();
-    digitalWrite( LED1, HIGH);
-    delay(500);
-    NMTOP();
-    digitalWrite( LED2, HIGH);
-    delay(500);
-    Setup = 1;
-}
-
-void loop() {
-  if( Serial1.available())
+//UART受信タスク
+void handleUARTTask( void *process)  //PRO_CORE Thread2(動確済み)
+{
+  while(1)
+  {
+    if( Serial1.available())
     {
       lan = Serial1.read();
       command();
     }
-
     setMode();
-    receiveCANMessage();
-    Serial.printf("Current1: %d, Current2: %d, Tension1: %.2f, Tension2: %.2f\n",
-              processed_current1, processed_current2, tensionValues[0], tensionValues[1]);
-    //vTaskDelay(  10 / portTICK_PERIOD_MS); 
-    sendTHE_P_Read1();
-    sendTHE_C_Read2();
-    delay(10);
+    vTaskDelay(  10 / portTICK_PERIOD_MS); 
+  }
 }
 
-
-void LoadCell( void *Process)
+//HX711管理タスク
+void handleLoadcellTask( void *process) //ADD_CORE Thread1
 {
   while(1)
   {
-
+    auto readState = reader.read();
+     if (readState == HX711_asukiaaa::ReadState::Success) {
+      for (int i = 0; i < reader.doutLen; ++i) {
+       float gram = parser.parseToGram(reader.values[i]) - offsetGrams[i];
+       float newtons = gram * 0.00981 * calibrationFactors[i];
+       tensionValues[i] = newtons; //配列に格納
+      }
+  }
+  vTaskDelay(  10 / portTICK_PERIOD_MS); 
+  }
+}
+//シリアルプロット管理タスク
+void SerialplotTask( void *process) //ADD_CORE THread2
+{
+  while(1)
+  {
+    unsigned long currentMillis = millis(); // ここで更新
   if(Setup)
   {
-    read_Tension();
+    if(currentMillis - previousMillis >= interval)
+    {
+      Serial.printf("Current1: %d, Current2: %d, Tension1: %.2f, Tension2: %.2f\r\n",processed_current1, processed_current2, tensionValues[0], tensionValues[1]);
+      Serial1.printf("sensor0: %.2f, sensor1: %.2f", tensionValues[0], tensionValues[1]);
+      previousMillis = currentMillis;
+    }
   }
-  //delay(10);
   vTaskDelay(  10 / portTICK_PERIOD_MS); 
+  //delay(10);
   }
 }
 
@@ -628,21 +650,4 @@ void setMode()
     Target_Velocity_1();
     Target_Velocity_2();
   }
-}
-
-void read_Tension() //電源部分の接続、モジュールの接触が悪い
-{
-  reader.read();
-  for( int i = 0; i < reader.doutLen; i++)
-  {
-    float gram = parser.parseToGram(reader.values[i]) - offsetGrams[i];
-    float newtons = gram * 0.00981 * calibrationFactors[i];
-    tensionValues[i] = newtons; //配列に格納
-  }
-  
-  Serial1.print("sensor0:");
-  Serial1.print(tensionValues[0]);
-  Serial1.print(",");
-  Serial1.print("sensor1:");
-  Serial1.println(tensionValues[1]);
 }

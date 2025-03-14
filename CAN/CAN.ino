@@ -1,10 +1,9 @@
-//Experimental Machine Ver.3.0
-//CAN Test(send only)
-//2025-02-23
+//Exeprimental machine ver.3.0
+//CAN Test(send - receive)
+//2025-03-02
 
 #include <Arduino.h>
 #include "driver/twai.h"
-#include <Wire.h>
 
 #define RX_PIN 4
 #define TX_PIN 5
@@ -12,8 +11,7 @@
 uint16_t current1 = 0;
 uint16_t current2 = 0;
 
-bool recived1 = false;
-bool recived2 = false;
+//uint8_t recceived_data[5];
 
 // EPOS CAN ID Def(Left or Right)
 #define ID_1_Tx_PDO01 0x181
@@ -61,64 +59,14 @@ const uint8_t PreOP[2] = { 0x80, 0x00};
 const uint8_t Operation[2] = { 0x01, 0x00};
 const uint8_t Reset_NMT[2] = { 0x82, 0x00};
 
-const uint8_t Read_Current1[4] = { 0x00, 0x00, 0x00, 0x00};
-const uint8_t Read_Current2[4] = { 0x00, 0x00, 0x00, 0x00};
+const uint8_t received_buffer1[4] = { 0x00, 0x00, 0x00, 0x00};
+const uint8_t received_buffer2[4] = { 0x00, 0x00, 0x00, 0x00};
 
 const uint8_t PVM[4] = { 0x03, 0x00, 0x64, 0x00};
 const uint8_t SCV[3] = { 0x09, 0x00, 0x64};
 
-// CAN 初期化
-void initCAN() {
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);
-    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
-    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-    
-    if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-        Serial.println("CANドライバのインストール成功");
-    } else {
-        Serial.println("CANドライバのインストール失敗");
-    }
-    
-    if (twai_start() == ESP_OK) {
-        Serial.println("CAN通信開始");
-    } else {
-        Serial.println("CAN通信開始失敗");
-    }
-}
-
-
-// CAN メッセージ送信
-void send_CAN_message(uint32_t id, uint8_t *data, uint8_t len) {
-    twai_message_t message;
-    message.identifier = id;
-    message.extd = 0;
-    message.data_length_code = len;
-    memcpy(message.data, data, len);
-    
-    if (twai_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
-        Serial.println("CANメッセージ送信成功");
-    } else {
-        Serial.println("CANメッセージ送信失敗");
-    }
-}
-
-// CAN メッセージ受信
-// CAN メッセージ受信
-uint16_t receiveCANMessage() {
-    twai_message_t msg;
-    if (twai_receive(&msg, pdMS_TO_TICKS(10)) == ESP_OK) {
-        Serial.printf("受信ID: 0x%X, データ長: %d\n", msg.identifier, msg.data_length_code);
-        for (int i = 0; i < msg.data_length_code; i++) {
-            Serial.printf("%02X ", msg.data[i]);
-        }
-        Serial.println();
-        // 受信データの解析 (修正: ビットシフト修正)
-        uint16_t current = (msg.data[0] << 8) | msg.data[1]; // msg.data[0] と msg.data[1] の結合
-        return current;
-    }
-    Serial.println("CANメッセージ受信失敗");
-    return 0;
-}
+uint8_t received_data1[5];  // 受信データ1の配列
+uint8_t received_data2[5];  // 受信データ2の配列
 
 //個別コマンド
 void NMTPRE()
@@ -141,58 +89,6 @@ void NMTOP()
   NMTOP.data[1] = Operation[1];
   uint32_t message_id = NMTOP.identifier;
   send_CAN_message( message_id, NMTOP.data, NMTOP.data_length_code);
-}
-
-void THE_P_Read1()
-{
-  twai_message_t THE_P_Read1;
-  THE_P_Read1.identifier = ID_1_Tx_PDO02;
-  THE_P_Read1.data_length_code = 4;
-  THE_P_Read1.data[0] = Read_Current1[0];
-  THE_P_Read1.data[1] = Read_Current1[1];
-  THE_P_Read1.data[2] = Read_Current1[2];
-  THE_P_Read1.data[3] = Read_Current1[3];
-  uint32_t message_id = THE_P_Read1.identifier;
-  send_CAN_message( message_id, THE_P_Read1.data, THE_P_Read1.data_length_code);
-}
-
-void THE_C_Read2()
-{
-  twai_message_t THE_C_Read2;
-  THE_C_Read2.identifier = ID_2_Tx_PDO02;
-  THE_C_Read2.data_length_code = 4;
-  THE_C_Read2.data[0] = Read_Current2[0];
-  THE_C_Read2.data[1] = Read_Current2[1];
-  THE_C_Read2.data[2] = Read_Current2[2];
-  THE_C_Read2.data[3] = Read_Current2[3];
-  uint32_t message_id = THE_C_Read2.identifier;
-  send_CAN_message( message_id, THE_C_Read2.data, THE_C_Read2.data_length_code);
-}
-
-void Read_Current1_1()
-{
-  twai_message_t Read_Current1_1;
-  Read_Current1_1.identifier = ID_1_Tx_PDO03;
-  Read_Current1_1.data_length_code = 4;
-  Read_Current1_1.data[0] = Read_Current1[0];
-  Read_Current1_1.data[1] = Read_Current1[1];
-  Read_Current1_1.data[2] = Read_Current1[2];
-  Read_Current1_1.data[3] = Read_Current1[3];
-  uint32_t message_id = Read_Current1_1.identifier;
-  send_CAN_message( message_id, Read_Current1_1.data, Read_Current1_1.data_length_code);
-}
-
-void Read_Current2_1()
-{
-  twai_message_t Read_Current2_1;
-  Read_Current2_1.identifier = ID_2_Tx_PDO03;
-  Read_Current2_1.data_length_code = 4;
-  Read_Current2_1.data[0] = Read_Current2[0];
-  Read_Current2_1.data[1] = Read_Current2[1];
-  Read_Current2_1.data[2] = Read_Current2[2];
-  Read_Current2_1.data[3] = Read_Current2[3];
-  uint32_t message_id = Read_Current2_1.identifier;
-  send_CAN_message( message_id, Read_Current2_1.data, Read_Current2_1.data_length_code);
 }
 
 void OP_Mode1_1()//PVM
@@ -374,6 +270,32 @@ void Target_Velocity_re2()
   send_CAN_message( message_id, Target_Velocity_re2.data, Target_Velocity_re2.data_length_code);
 }
 
+void received_data1()
+{
+  twai_message_t received_data1;
+  received_data1.identifier = ID_1_Tx_PDO02;
+  received_data1.data_length_code = 4;
+  received_data1.data[0] = received_buffer1[0];
+  received_data1.data[1] = received_buffer1[1];
+  received_data1.data[2] = received_buffer1[2];
+  received_data1.data[3] = received_buffer1[3];
+  uint32_t message_id = received_data1.identifier;
+  send_CAN_message( message_id, received_data1.data, received_data1.data_length_code);
+}
+
+void received_data2()
+{
+  twai_message_t received_data2;
+  received_data2.identifier = ID_2_Tx_PDO02;
+  received_data2.data_length_code = 4;
+  received_data2.data[0] = received_buffer1[0];
+  received_data2.data[1] = received_buffer1[1];
+  received_data2.data[2] = received_buffer1[2];
+  received_data2.data[3] = received_buffer2[3];
+  uint32_t message_id = received_data2.identifier;
+  send_CAN_message( message_id, received_data2.data, received_data2.data_length_code);
+}
+
 long DX1, DX2;
 float EX1, EX2;
 
@@ -392,8 +314,57 @@ void DEXTRA2() {
   EX2 = (float)DX2;  // 変換後の値をEX2に格納
 }
 
-// 設定
-void setup() {
+// CAN 初期化
+void initCAN() {
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);
+    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
+    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    
+    if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+        Serial.println("CANドライバのインストール成功");
+    } else {
+        Serial.println("CANドライバのインストール失敗");
+    }
+    
+    if (twai_start() == ESP_OK) {
+        Serial.println("CAN通信開始");
+    } else {
+        Serial.println("CAN通信開始失敗");
+    }
+}
+
+// CAN メッセージ送信
+void send_CAN_message(uint32_t id, uint8_t *data, uint8_t len) {
+    twai_message_t message;
+    message.identifier = id;
+    message.extd = 0;
+    message.data_length_code = len;
+    memcpy(message.data, data, len);
+    twai_transmit(&message, pdMS_TO_TICKS(10));
+}
+
+void processCANMessage() {
+twai_message_t message;
+    {
+      float currentA, currentB;
+    if (message.identifier == 0x281) { 
+        memcpy(received_data1, message.data, 5);
+        snprintf(STR1, 11, "%02x%02x%02x%02x", received_data1.data[3], received_data1.data[2], received_data1.data[1], received_data1.data[0]);
+        DX1 = strtoul(STR1, NULL, 16);
+        currentA = (abs(0.001f * static_cast<float>(DX1)));
+    }
+
+    if (message.identifier == 0x290) { 
+        memcpy(received_data2, message.data, 5);
+        snprintf(STR2, 11, "%02x%02x%02x%02x", received_data2.data[3], received_data2.data[2], received_data2.data[1], received_data2.data[0]);
+        DX2 = strtoul(STR2, NULL, 16);
+        currentB = (abs(0.001f * static_cast<float>(DX2)));
+    }
+    }
+}
+
+void setup()
+{
     Serial.begin( 115200);
     initCAN();
     delay(1000);
@@ -401,24 +372,29 @@ void setup() {
     delay(500);
     NMTOP();
     delay(500);
-    OP_Mode1_2();
-    OP_Mode2_2();
-    delay(500);
-    ControlWord1_1();
-    ControlWord2_1();
-    delay(500);
-    ControlWord1_2();
-    ControlWord2_2();
-    delay(500);
-    Target_Velocity_1();
-    Target_Velocity_re2();    
-    delay(500);
 }
 
-void loop() {
-   // uint16_t current = receiveCANMessage();
-   // Serial.printf("受信電流: %d mA\n", current);
-    Target_Velocity_1();
-    Target_Velocity_re2();    
-    delay(500);
-}
+void loop()
+{
+ // processCANMessage();
+   CAN_message_t message;
+  if (CAN.available()) {
+    CAN.read(message);  // メッセージを読み取る
+
+    // 受信データ1の処理
+    memcpy(received_data1, message.data, 5);  // message.dataから受信データ1にコピー
+    snprintf(STR1, 11, "%02x%02x%02x%02x%02x", received_data1[0], received_data1[1], received_data1[2], received_data1[3], received_data1[4]);
+    
+    // 受信データ1をシリアルモニタに表示
+    Serial.print("Received Data 1: ");
+    Serial.println(STR1);
+    
+    // 受信データ2の処理
+    memcpy(received_data2, message.data, 5);  // message.dataから受信データ2にコピー
+    snprintf(STR2, 11, "%02x%02x%02x%02x%02x", received_data2[0], received_data2[1], received_data2[2], received_data2[3], received_data2[4]);
+    
+    // 受信データ2をシリアルモニタに表示
+    Serial.print("Received Data 2: ");
+    Serial.println(STR2);
+  }
+  }
