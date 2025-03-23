@@ -1,91 +1,48 @@
-//Eveprimental machine Ver.3.0
-//slave (Driving motor control and Reading Tension)
-//SPI mastre
-//Author Ryoya SATO
-//2025-02-25
+//Experimental machine Ver.3.0
+//2025-03-23
+//CAN communication send type test
 
 #include <Arduino.h>
 #include "driver/twai.h"
-#include <Wire.h>
-#include <HX711_asukiaaa.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_system.h"
-#include "esp_task_wdt.h"
 #include "CAN_library.h"
-
+#include <HX711_Git.h>
+#include <cstring>
+#include "CANMessage.h"
 #define RX_PIN 4
 #define TX_PIN 5
 
-int setup_done = 0; //setup()が完了したかどうかのフラグ
+unsigned long previousMillis = 0;
+const long interval = 10;
+#define POLLING_RATE_MS 100
 
 int LED1 = 25;
 int LED2 = 13;
 int LED3 = 26;
 int LED4 = 12;
 
-uint16_t current_1 = 0;
-uint16_t processed_current1 = 0;
-uint16_t current_2 = 0;
-uint16_t processed_current2 = 0;
-float current_average = 0;
-
-bool recieved1 = false;
-bool recieved2 = false;
-
-int mode = 0;
 char lan;
+int mode = 0;
+int Setup = 0;
 
-int pinsDout[] = { 21, 32};
-const int numPins = sizeof( pinsDout) / sizeof( pinsDout[0]) ;
-int pinSlk = 22;
-//センサデータを格納するバッファ
-float tensionValues[2];
-float tensionValues1[2];
+static bool driver_installed = false;
 
-HX711_asukiaaa::Reader reader( pinsDout, numPins, pinSlk);
-String output = "";
-
-TaskHandle_t thp[2]; //マルチスレッドのタスクハンドル格納
-
-QueueHandle_t tensionQueue; //Queueを使う準備
-
-#define LOAD_CELL_RATED_VOLT 0.0075f
-#define LOAD_CELL_RATED_GRAM 10000.0f
-
-//入力抵抗調整
-#define HX711_R1 1000.0
-
-//フィルタ抵抗
-#define HX711_R2 1000.0
-
-//時間管理
-unsigned long prevMicros = 0;
-const unsigned long intervalMicros = 10000; //10ms
-
-HX711_asukiaaa::Parser parser( LOAD_CELL_RATED_VOLT, LOAD_CELL_RATED_GRAM, HX711_R1, HX711_R2);
-float offsetGrams[numPins];
-float calibrationFactors[numPins] = { 1, 1}; //各センサに対する校正係数
-
-//LED 初期化
-void initLED()
+void initCAN() 
 {
-  pinMode( LED1, OUTPUT);
-  pinMode( LED2, OUTPUT);
-  pinMode( LED3, OUTPUT);
-  pinMode( LED4, OUTPUT);
-}
-
-// CAN 初期化
-void initCAN() {
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);
-    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
-    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-    
+    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
+    //twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    twai_filter_config_t f_config = {
+    .acceptance_code = 0x290,  // 基準となるID（共通部分）
+    .acceptance_mask = 0x011,  // 最下位5ビット（0x1F）を無視する
+    .single_filter = true
+    };
+    g_config.rx_queue_len = 20;
+
     if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
         Serial.println("CANドライバのインストール成功");
     } else {
         Serial.println("CANドライバのインストール失敗");
+        return;
     }
     
     if (twai_start() == ESP_OK) {
@@ -93,91 +50,66 @@ void initCAN() {
     } else {
         Serial.println("CAN通信開始失敗");
     }
+    //アラートの設定
+    uint32_t alerts_to_enable = TWAI_ALERT_RX_DATA | TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_ERROR | TWAI_ALERT_RX_QUEUE_FULL;
+    if( twai_reconfigure_alerts( alerts_to_enable, NULL) == ESP_OK)
+    {
+      Serial.println("CAN Alerts reconfigured");
+    }else{
+      Serial.println("Failed to reconfigure alerts");
+    }
+    driver_installed = true;
 }
 
-void init_HX711()
+void ledsetup()
 {
-  while( reader.read() != 0)
-  {
-    Serial.println("Failed initial reading... Retry.");
-    delay(500);
-  }
-  for( int i = 0; i < reader.doutLen; i++)
-  {
-    offsetGrams[i] = parser.parseToGram( reader.values[i]);
-  }
+  pinMode( LED1, OUTPUT);
+  pinMode( LED2, OUTPUT);
+  pinMode( LED3, OUTPUT);
+  pinMode( LED4, OUTPUT);
 }
 
-void read_Tension()
+void send_CAN_message(uint32_t id, uint8_t *data, uint8_t len) 
 {
-  for( int i = 0; i < reader.doutLen; i++)
-  {
-    float gram = parser.parseToGram(reader.values[i] - offsetGrams[i]);
-    float newtons = gram * 0.00981 * calibrationFactors[i];
-
-    tensionValues[i] = newtons; //配列に格納
-    //output += "Tension" + String(i) + ":" + String(newtons, 2) + "N,";
-  }
-  Serial1.print("sensor0:");
-  Serial1.print(tensionValues[0]);
-  Serial1.print(",");
-  Serial1.print("sensor2:");
-  Serial1.println(tensionValues[1]);
-  //output.trim();
-  //output.remove( output.length() - 1);
-  //Serial.println(output);
-}
-
-// CAN メッセージ送信
-void send_CAN_message(uint32_t id, uint8_t *data, uint8_t len) {
     twai_message_t message;
     message.identifier = id;
     message.extd = 0;
     message.data_length_code = len;
     memcpy(message.data, data, len);
     
-    twai_transmit( &message, pdMS_TO_TICKS(10));
+    if (twai_transmit(&message, pdMS_TO_TICKS(10)) != ESP_OK) {
+        Serial.println("CAN送信失敗");
+    }
 }
 
-// CAN メッセージ受信
-void receiveCANMessage() {
-    twai_message_t message;
-    //esp_err_t res = twai_receive( &message, portMAX_DELAY); //受信待機
-    //if ( res == ESP_OK) 
-    //{
-      if( message.identifier == 0x281)
-      {
-      Serial.println("148");
-      //ID_1からの電流値を解析
-      current_1 = ( message.data[0] << 5) | message.data[1];
-      processed_current1 = current_1; //校正式
-      Serial.print(processed_current1);
-      }
-      else if( message.identifier == 0x290)
-      {
-        Serial.println("155");
-        //ID_2からの電流値を解析
-        current_2 = ( message.data[0] << 5) | message.data[1];
-        processed_current2 = current_2; //校正式
-        Serial.print(processed_current2);
-      }
-    //}
+void setup() {
+  Serial.begin( 500000);
+  Serial1.begin( 115200, SERIAL_8N1, 18, 19);
+  delay(500);
+  initCAN();
+  ledsetup();
+  delay(500);
+  NMTPRE();
+  digitalWrite( LED1, HIGH);
+  delay(1000);
+  NMTOP();
+  digitalWrite( LED2, HIGH);
+  delay(1000);
+  Setup = 1;
 }
 
-void Predicted_Traction_Model()
-{
-  float sum = 0, tension_average = 0;
-  uint16_t length = 2;
-  for( int i = 0; i < length; i++)
+
+
+void loop() {
+  if( Serial1.available())
   {
-    sum += tensionValues[i];
+    lan = Serial1.read();
+    command();
   }
-  tension_average = sum / length;
-  current_average = ( current_1 + current_2) / 2;
-  //駆動トルクへの変換式
+  setMode();
+  vTaskDelay(  10 / portTICK_PERIOD_MS); 
 }
 
-//個別コマンド
 void NMTPRE()
 {
   twai_message_t NMTPRE;
@@ -198,58 +130,6 @@ void NMTOP()
   NMTOP.data[1] = CAN_Commands.Operation[1];
   uint32_t message_id = NMTOP.identifier;
   send_CAN_message( message_id, NMTOP.data, NMTOP.data_length_code);
-}
-
-void THE_P_Read1()
-{
-  twai_message_t THE_P_Read1;
-  THE_P_Read1.identifier = Motor1_IDs.Tx_PDO02;
-  THE_P_Read1.data_length_code = 4;
-  THE_P_Read1.data[0] = CAN_Commands.Read_Current1[0];
-  THE_P_Read1.data[1] = CAN_Commands.Read_Current1[1];
-  THE_P_Read1.data[2] = CAN_Commands.Read_Current1[2];
-  THE_P_Read1.data[3] = CAN_Commands.Read_Current1[3];
-  uint32_t message_id = THE_P_Read1.identifier;
-  send_CAN_message( message_id, THE_P_Read1.data, THE_P_Read1.data_length_code);
-}
-
-void THE_C_Read2()
-{
-  twai_message_t THE_C_Read2;
-  THE_C_Read2.identifier = Motor2_IDs.Tx_PDO02;
-  THE_C_Read2.data_length_code = 4;
-  THE_C_Read2.data[0] = CAN_Commands.Read_Current2[0];
-  THE_C_Read2.data[1] = CAN_Commands.Read_Current2[1];
-  THE_C_Read2.data[2] = CAN_Commands.Read_Current2[2];
-  THE_C_Read2.data[3] = CAN_Commands.Read_Current2[3];
-  uint32_t message_id = THE_C_Read2.identifier;
-  send_CAN_message( message_id, THE_C_Read2.data, THE_C_Read2.data_length_code);
-}
-
-void Read_Current1_1()
-{
-  twai_message_t Read_Current1_1;
-  Read_Current1_1.identifier = Motor1_IDs.Tx_PDO03;
-  Read_Current1_1.data_length_code = 4;
-  Read_Current1_1.data[0] = CAN_Commands.Read_Current1[0];
-  Read_Current1_1.data[1] = CAN_Commands.Read_Current1[1];
-  Read_Current1_1.data[2] = CAN_Commands.Read_Current1[2];
-  Read_Current1_1.data[3] = CAN_Commands.Read_Current1[3];
-  uint32_t message_id = Read_Current1_1.identifier;
-  send_CAN_message( message_id, Read_Current1_1.data, Read_Current1_1.data_length_code);
-}
-
-void Read_Current2_1()
-{
-  twai_message_t Read_Current2_1;
-  Read_Current2_1.identifier = Motor2_IDs.Tx_PDO03;
-  Read_Current2_1.data_length_code = 4;
-  Read_Current2_1.data[0] = CAN_Commands.Read_Current2[0];
-  Read_Current2_1.data[1] = CAN_Commands.Read_Current2[1];
-  Read_Current2_1.data[2] = CAN_Commands.Read_Current2[2];
-  Read_Current2_1.data[3] = CAN_Commands.Read_Current2[3];
-  uint32_t message_id = Read_Current2_1.identifier;
-  send_CAN_message( message_id, Read_Current2_1.data, Read_Current2_1.data_length_code);
 }
 
 void OP_Mode1_1()//PVM
@@ -431,40 +311,6 @@ void Target_Velocity_re2()
   send_CAN_message( message_id, Target_Velocity_re2.data, Target_Velocity_re2.data_length_code);
 }
 
-long DX1, DX2;
-float EX1, EX2;
-
-char STR1[5] = { '\0'};
-char STR2[5] = { '\0'};
-
-// DEXTRA1関数
-void DEXTRA1()
-{
-  DX1 = 0.001 * strtol(STR1, NULL, 16);  // HEXから10進数に変換してDX1に格納
-  EX1 = (float)DX1;  // 変換後の値をEX1に格納
-}
-
-// DEXTRA2関数
-void DEXTRA2()
-{
-  DX2 = 0.001 * strtol(STR2, NULL, 16);  // HEXから10進数に変換してDX2に格納
-  EX2 = (float)DX2;  // 変換後の値をEX2に格納
-}
-
-void printData( float* tensionValues1)
-{
-  Serial.print( current_1, 2);
-  Serial.print(",");
-  Serial.print( current_2, 2);
-
-  for( int i = 0; i < reader.doutLen; i++)
-  {
-    Serial.print(",");
-    Serial.print( tensionValues1[i], 2); 
-  }
-  Serial.println();
-}
-
 void command()
 {
   switch(lan)
@@ -473,22 +319,22 @@ void command()
       OP_Mode1_2();
       OP_Mode2_2();
       digitalWrite( LED1, HIGH); //led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_1();
       ControlWord2_1();
       digitalWrite( LED2, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_2();
       ControlWord2_2();
       digitalWrite( LED3, HIGH); //led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       Target_Velocity_1();
       Target_Velocity_re2();
       digitalWrite( LED4, HIGH); //led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       mode = 1;
       lan = 0;
@@ -498,22 +344,22 @@ void command()
       OP_Mode1_2();
       OP_Mode2_2();
       digitalWrite( LED1, HIGH); //led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_1();
       ControlWord2_1();
       digitalWrite( LED2, HIGH); //led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_2();
       ControlWord2_2();
       digitalWrite( LED3, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       Target_Velocity_re1();
       Target_Velocity_2();
       digitalWrite( LED4, HIGH); //led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
     
       mode = 2;
       lan = 0;
@@ -524,12 +370,12 @@ void command()
       ControlWord2_1();
       digitalWrite( LED1, HIGH); //led on
       digitalWrite( LED2, HIGH);
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
       ControlWord2_2();
       digitalWrite( LED3, HIGH); //led on
       Target_Velocity_re2();
       digitalWrite( LED4, HIGH);
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       mode = 3;
       lan = 0;
@@ -539,22 +385,22 @@ void command()
       OP_Mode1_2();
       OP_Mode2_2();
       digitalWrite( LED1, HIGH); //led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_1();
       ControlWord2_1();
       digitalWrite( LED2, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_2();
       ControlWord2_2();
       digitalWrite( LED3, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       Target_Velocity_re1();
       Target_Velocity_re2();
       digitalWrite( LED4, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       mode = 4;
       lan = 0;
@@ -565,13 +411,13 @@ void command()
       ControlWord1_1();
       digitalWrite( LED1, HIGH);//led on
       digitalWrite( LED2, HIGH);
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_2();
       Target_Velocity_1();
       digitalWrite( LED3, HIGH);
       digitalWrite( LED4, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       mode = 5;
       lan = 0;
@@ -581,22 +427,22 @@ void command()
       OP_Mode1_2();
       OP_Mode2_2();
       digitalWrite( LED1, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_1();
       ControlWord2_1();
       digitalWrite( LED2, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       ControlWord1_2();
       ControlWord2_2();
       digitalWrite( LED3, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       Target_Velocity_1();
       Target_Velocity_2();
       digitalWrite( LED4, HIGH);//led on
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
 
       mode = 6;
       lan = 0;
@@ -610,6 +456,7 @@ void command()
       digitalWrite( LED3, LOW);
       digitalWrite( LED4, LOW);
       break;
+
   }
 }
 
@@ -621,8 +468,8 @@ void setMode()
     //Stop
     ControlWord1_3();
     ControlWord2_3();
-    //digitalWrite(LED3_PIN, LOW);
-    //digitalWrite(LED4_PIN, LOW);
+    digitalWrite(LED3, LOW);
+    digitalWrite(LED4, LOW);
 
   }else if( mode == 1)
   {
@@ -657,93 +504,5 @@ void setMode()
     //右超信地旋回
     Target_Velocity_1();
     Target_Velocity_2();
-  }
-}
-
-void setup() {
-  Serial.begin( 115200);
-  Serial1.begin( 115200, SERIAL_8N1, 18, 19);
-  tensionQueue = xQueueCreate( 10, 16);
-  //ロードセルの初期化をコア0で行う
-  xTaskCreatePinnedToCore( loadCellTask, "LoadCellTask", 4096, NULL, 1, &thp[0], 0);
-  //loadCellTask:実行するタスク, "LoadCellTask":タスク名, 2048:スタックメモリ, NULL:Pass, 1:タスクの優先順位, NULL:作成したタスクのハンドルオブジェクト, 0:コア番号
-  //CAN通信・シリアル出力の処理をコア1で行う
-  xTaskCreatePinnedToCore( serialOutputTask, "SerialOUTputTask", 4096, NULL, 1, &thp[1], 1);
-  delay(500);
-  initLED();
-  delay(500);
-  initCAN();
-  delay(500);
-  init_HX711();
-  delay(1000);
-  NMTPRE();
-  delay(500);
-  digitalWrite( LED1, HIGH);//LED1 Light
-  NMTOP();
-  digitalWrite( LED2, HIGH);//LED2 Light
-  delay(500);
-  Serial.println("Setup done...");
-  setup_done = 1;//setup()の終了を通知
-}
-
-void loop() {
-  delay(100);
-}
-
-void serialOutputTask( void *pvParameters ) {
-  float tensionValues1[2];
-  while(setup_done==0)
-  {
-    vTaskDelay( 10/portTICK_PERIOD_MS);
-  }
-  while(1) {
-    Serial.println("688");
-    static unsigned long lastTime = 0;
-    unsigned long currentTime = millis();
-    
-    // UARTコマンドを確認
-    if(Serial.available()) {
-      lan = Serial.read();
-      command();
-    }
-    
-    setMode();
-    Serial.println("699");  // この行は表示されるか？
-    receiveCANMessage();  // CANメッセージの受信確認
-    Serial.println("701");  // この行は表示されるか？
-    
-    if (xQueueReceive(tensionQueue, &tensionValues1, 10)) {
-      Serial.println("703");  // キューからデータを取得
-      printData(tensionValues1);
-      Serial.println("705");  // データの表示
-    } else {
-      Serial.println("Queue Empty!");  // キューが空の場合
-    }
-    
-    delay(5);
-  }
-}
-
-
-void loadCellTask(void *pvParameters) //Tension 
-{
-  while(setup_done==0)
-  {
-    vTaskDelay( 10/portTICK_PERIOD_MS);
-  }
-  while(1)
-  {
-    unsigned long currentMicros = micros();
-    if( currentMicros - prevMicros >= intervalMicros)
-    {
-      Serial.println("717");
-      prevMicros = currentMicros;
-      Serial.println("719");
-      read_Tension();
-      Serial.println("721");
-      xQueueSend( tensionQueue, &tensionValues, 0);
-      Serial.println("723");
-    }
-    delay(5);
   }
 }

@@ -6,6 +6,12 @@
 #include "driver/twai.h"
 #include "CAN_library.h"
 #include <HX711_Git.h>
+#include <cstring>
+#include "CANMessage.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+
+QueueHandle_t rx_queue;
 
 //CAN通信用ピン
 #define RX_PIN 4
@@ -15,13 +21,15 @@ unsigned long previousMillis = 0;
 const long interval = 10;  // 1秒=1000ms
 
 //マルチスレッドのタスクハンドル格納
-TaskHandle_t Process[2];
+TaskHandle_t Process[3];
 
 //グローバル変数
-uint16_t processed_current1 = 0;
-uint16_t processed_current2 = 0;
+float processed_current1 = 0;
+float processed_current2 = 0;
 float tensionValues[2];
 float tensionValues1[2];
+uint32_t raw_value1 = 0;
+uint32_t raw_value2 = 0;
 char lan;
 int mode = 0;
 int Setup = 0;
@@ -31,6 +39,10 @@ int LED1 = 25;
 int LED2 = 13;
 int LED3 = 26;
 int LED4 = 12;
+
+long DX1, DX2;
+char STR1[5] = { '\0'};
+char STR2[5] = { '\0'};
 
 //HX711関係
 int pinsDout[] = { 21, 32};
@@ -50,17 +62,50 @@ HX711_asukiaaa::Parser parser( LOAD_CELL_RATED_VOLT, LOAD_CELL_RATED_GRAM, HX711
 float offsetGrams[numPins];
 float calibrationFactors[numPins] = { 208.4486, 205.6171}; //各センサに対する校正係数
 
+static bool driver_installed = false;
+
+static void handle_rx_message( twai_message_t &message)
+{
+  switch( message.identifier)
+  {
+    case 0x281:
+      uint8_t reversed_data1[5] ; 
+      for( int i = 0; i < message.data_length_code; i++)
+      {
+        reversed_data1[i] = message.data[message.data_length_code - 1-i];
+      }      
+      raw_value1 = ( reversed_data1[0] << 24) | ( reversed_data1[1] << 16) | ( reversed_data1[2] << 8) | reversed_data1[3];
+      processed_current1 = *((float*)&raw_value1);
+      break;
+  
+    case 0x290:
+      uint8_t reversed_data2[5] ; 
+      for( int i = 0; i < message.data_length_code; i++)
+      {
+        reversed_data2[i] = message.data[message.data_length_code - 1-i];
+      }
+      raw_value2 = ( reversed_data2[0] << 24) | ( reversed_data2[1] << 16) | ( reversed_data2[2] << 8) | reversed_data2[3];
+      processed_current2 = *((float*)&raw_value2);
+      break;
+    
+    default:
+      //その他のIDを無視する
+      break;
+  }
+}
+
 // CANの初期化
 void initCAN() 
 {
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
-   // twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    //twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     twai_filter_config_t f_config = {
     .acceptance_code = (0x280 << 21),  // 基準となるID（共通部分）
     .acceptance_mask = ~(0x1F << 16),  // 最下位5ビット（0x1F）を無視する
     .single_filter = true
     };
+    g_config.rx_queue_len = 20;
 
     if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
         Serial.println("CANドライバのインストール成功");
@@ -74,6 +119,15 @@ void initCAN()
     } else {
         Serial.println("CAN通信開始失敗");
     }
+    //アラートの設定
+    uint32_t alerts_to_enable = TWAI_ALERT_RX_DATA | TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_ERROR | TWAI_ALERT_RX_QUEUE_FULL;
+    if( twai_reconfigure_alerts( alerts_to_enable, NULL) == ESP_OK)
+    {
+      Serial.println("CAN Alerts reconfigured");
+    }else{
+      Serial.println("Failed to reconfigure alerts");
+    }
+    driver_installed = true;
 }
 
 //LED_setup
@@ -85,53 +139,21 @@ void ledsetup()
   pinMode( LED4, OUTPUT);
 }
 
-void init_HX711() //どうにかして即応性をあげたい
+void init_HX711()
 {
   reader.begin();
-  /*
+  
   while( reader.read() != 0)
   {
     Serial.println("Failed initial reading... Retry.");
     delay(100);
   }
-  */
+  
   //オフセット処理
   for( int i = 0; i < reader.doutLen; i++)
   {
     offsetGrams[i] = parser.parseToGram( reader.values[i]);
   }
-}
-
-// CANメッセージ受信
-void receiveCANMessage() 
-{
-    twai_message_t message;
-    esp_err_t res;
-
-    // 受信可能なデータがある限り処理する
-    while ((res = twai_receive(&message, 10 / portTICK_PERIOD_MS)) == ESP_OK) {
-
-        // データ長チェック (4バイトのデータのみを対象)
-        if (message.data_length_code == 4) {
-           uint32_t received_value = (int32_t)(message.data[0] << 24) | (message.data[1] << 16) | (message.data[3] << 8) | message.data[0];
-
-            switch (message.identifier) {
-                case 0x281:
-                    processed_current1 = abs( 0.001f *static_cast<float>(received_value)) * 0.9118 + 0.2183;
-                    break;
-                case 0x290:
-                    processed_current2 = abs( 0.001f*static_cast<float>(received_value)) * 0.9638 + 0.1442;
-                    break;
-                default:
-                    // その他のIDを無視する
-                    break;
-            }
-          //   Serial.printf("Current1: %d, Current2: %d\n",processed_current1, processed_current2);
-        }
-
-        // バッファをクリア (次の受信に備える)
-        memset(&message, 0, sizeof(message));
-    }
 }
 
 // CANメッセージ送信
@@ -153,38 +175,54 @@ void setup()
   Serial.begin( 500000);
   Serial1.begin( 115200, SERIAL_8N1, 18, 19);
   init_HX711();
-  delay(500);
+ // delay(500);
   initCAN();
   ledsetup();
   xTaskCreatePinnedToCore( handleUARTTask, "UART Task", 8192, NULL, 4,  &Process[0], 0);
   xTaskCreatePinnedToCore( handleLoadcellTask, "Loadcell Task", 8192, NULL, 3,  &Process[1], 1);
-  xTaskCreatePinnedToCore( SerialplotTask, "Serial plot Task", 4096, NULL, 2,  &Process[2], 1);
-  delay(500);
+ // xTaskCreatePinnedToCore( SerialplotTask, "Serial plot Task", 8192, NULL, 2,  &Process[2], 1);
+  xTaskCreatePinnedToCore( CAN_receive_task, "CAN_RX_TASK", 8192, NULL, 5, &Process[3], 0);
+  //delay(500);
   NMTPRE();
   digitalWrite( LED1, HIGH);
-  delay(500);
+  delay(1000);
   NMTOP();
   digitalWrite( LED2, HIGH);
-  delay(500);
+  delay(1000);
   Setup = 1;
 }
 
-void loop() //PRO_CORE Thread1(動確済み)
+void loop()
 {
+  vTaskDelay(  10 / portTICK_PERIOD_MS);
+}
+
+void CAN_receive_task( void *Process) //PRO_CORE Thread1(動確済み)
+{
+  while(1)
+  {
   unsigned long currentMillis = millis();
-  if(Setup)
+  twai_message_t message;
+  if(driver_installed)
   {
     if(currentMillis - previousMillis >= interval)
     {
-      sendTHE_P_Read1();
-      sendTHE_C_Read2();
-      receiveCANMessage();
+    //Serial.println("OK");
+    sendTHE_P_Read1();  // 空パケット送信
+    sendTHE_C_Read2();  // 空パケット送信
+    if( twai_receive( &message, 0) == ESP_OK)
+    {
+      handle_rx_message( message);
     }
+    previousMillis = currentMillis;
+    } 
+  }
+  vTaskDelay(  10 / portTICK_PERIOD_MS);
   }
 }
 
 //UART受信タスク
-void handleUARTTask( void *process)  //PRO_CORE Thread2(動確済み)
+void handleUARTTask( void *Process)  //PRO_CORE Thread2(動確済み)
 {
   while(1)
   {
@@ -199,7 +237,7 @@ void handleUARTTask( void *process)  //PRO_CORE Thread2(動確済み)
 }
 
 //HX711管理タスク
-void handleLoadcellTask( void *process) //ADD_CORE Thread1
+void handleLoadcellTask( void *Process) //ADD_CORE Thread1
 {
   while(1)
   {
@@ -214,8 +252,10 @@ void handleLoadcellTask( void *process) //ADD_CORE Thread1
   vTaskDelay(  10 / portTICK_PERIOD_MS); 
   }
 }
+
 //シリアルプロット管理タスク
-void SerialplotTask( void *process) //ADD_CORE THread2
+/*
+void SerialplotTask( void *Process) //ADD_CORE THread2
 {
   while(1)
   {
@@ -224,8 +264,8 @@ void SerialplotTask( void *process) //ADD_CORE THread2
   {
     if(currentMillis - previousMillis >= interval)
     {
-      Serial.printf("Current1: %d, Current2: %d, Tension1: %.2f, Tension2: %.2f\r\n",processed_current1, processed_current2, tensionValues[0], tensionValues[1]);
-      Serial1.printf("sensor0: %.2f, sensor1: %.2f", tensionValues[0], tensionValues[1]);
+      Serial.printf("Current1: %.2f, Current2: %.2f, Tension1: %.2f, Tension2: %.2f\r\n", processed_current1, processed_current2, tensionValues[0], tensionValues[1]);
+      Serial1.printf("sensor0: %.2f, sensor1: %.2f\n", tensionValues[0], tensionValues[1]);
       previousMillis = currentMillis;
     }
   }
@@ -233,10 +273,57 @@ void SerialplotTask( void *process) //ADD_CORE THread2
   //delay(10);
   }
 }
+*/
 
 //個別コマンド
-// 送信関数
-void sendTHE_P_Read1() {
+void CAN_receive()
+{
+  if(!driver_installed)
+  {
+    vTaskDelay(  10 / portTICK_PERIOD_MS);
+    return;
+  }
+  //アラートを確認
+  uint32_t alerts_triggered;
+  twai_read_alerts( &alerts_triggered, pdMS_TO_TICKS(10));
+  twai_status_info_t twaistatus;
+  twai_get_status_info( &twaistatus);
+
+  //アラート処理
+  if( alerts_triggered & TWAI_ALERT_ERR_PASS)
+  {
+    Serial.println("Alert: TWAI controller has become error passive.");
+  }
+  if( alerts_triggered & TWAI_ALERT_BUS_ERROR)
+  {
+    Serial.println("Alert: A(Bit, stuff, CRC, From, ACK)error has occurred on the bus.");
+    Serial.printf("Bus eeror count: %lu\n", twaistatus.bus_error_count);
+  }
+  if( alerts_triggered & TWAI_ALERT_RX_QUEUE_FULL)
+  {
+    Serial.println("Alert: The RX queue is full causing a received frame to be lost.");
+    Serial.printf("RX buffered: %lu\t", twaistatus.msgs_to_rx);
+    Serial.printf("RX ,issed: %lu\t", twaistatus.rx_missed_count);
+    Serial.printf("RX overrun %lu\n", twaistatus.rx_overrun_count);
+  }
+
+  //受信データ処理
+  if( alerts_triggered & TWAI_ALERT_RX_DATA)
+  {
+    twai_message_t message;
+    esp_err_t res;
+
+    if(( twai_receive( &message, 0)) == ESP_OK)
+    {
+      if( message.data_length_code == 4)
+        handle_rx_message( message);
+    }
+  }
+}
+
+
+void sendTHE_P_Read1()
+{
     uint8_t data[4] = {
         CAN_Commands.Read_Current1[0],
         CAN_Commands.Read_Current1[1],
@@ -246,7 +333,8 @@ void sendTHE_P_Read1() {
     send_CAN_message(Motor1_IDs.Tx_PDO02, data, 4);
 }
 
-void sendTHE_C_Read2() {
+void sendTHE_C_Read2()
+{
     uint8_t data[4] = {
         CAN_Commands.Read_Current2[0],
         CAN_Commands.Read_Current2[1],
@@ -254,6 +342,28 @@ void sendTHE_C_Read2() {
         CAN_Commands.Read_Current2[3]
     };
     send_CAN_message(Motor2_IDs.Tx_PDO02, data, 4);
+}
+
+void Read_Current1_1()
+{
+      uint8_t data[4] = {
+        CAN_Commands.Read_Current1[0],
+        CAN_Commands.Read_Current1[1],
+        CAN_Commands.Read_Current1[2],
+        CAN_Commands.Read_Current1[3]
+    };
+    send_CAN_message( Motor1_IDs.Tx_PDO03, data, 4);
+}
+
+void Read_Current2_1()
+{
+      uint8_t data[4] = {
+        CAN_Commands.Read_Current2[0],
+        CAN_Commands.Read_Current2[1],
+        CAN_Commands.Read_Current2[2],
+        CAN_Commands.Read_Current2[3]
+    };
+    send_CAN_message( Motor2_IDs.Tx_PDO03, data, 4);
 }
 
 void NMTPRE()
@@ -602,6 +712,7 @@ void command()
       digitalWrite( LED3, LOW);
       digitalWrite( LED4, LOW);
       break;
+
   }
 }
 

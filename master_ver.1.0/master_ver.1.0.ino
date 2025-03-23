@@ -11,7 +11,7 @@ int DIRR = 25;
 int SLPR = 21;
 int PWMR = 0;
 
-int DIRL = 33;
+int DIRL = 14;
 int SLPL = 32;
 int PWML = 12;
 
@@ -21,13 +21,13 @@ int Setup = 0;
 
 float sensor0Value, sensor1Value;
 float target_tension = 0;
-float T = 0.01;
+float T = 0.02;
 
-float p_gain1 = 1.0;
+float p_gain1 = 0.7;
 float i_gain1 = 0.1;
 float d_gain1 = 0.01;
 
-float p_gain2 = 1.0;
+float p_gain2 = 0.7;
 float i_gain2 = 0.1;
 float d_gain2 = 0.01;
 
@@ -80,7 +80,7 @@ void command( char lan)
 void setup() {
   Serial.begin( 115200);
   Serial1.begin( 115200, SERIAL_8N1, 18, 19);
-  xTaskCreatePinnedToCore( Tension_controlTask, "TensionControlTask", 8192, NULL, 1, &Process[0], 0);
+  xTaskCreatePinnedToCore( Tension_controlTask, "TensionControlTask", 8192, NULL, 0, &Process[0], 1);
   pin_set();
 }
 
@@ -129,7 +129,6 @@ void Tension_controlTask( void *Process)
   {
     //UARTデータを読む
     read_uart();
-    //Serial.println( target_tension);
     float Error_force1 = target_tension - sensor0Value;
     float Error_force2 = target_tension - sensor1Value;
     force1_integral += Error_force1 * T;
@@ -145,21 +144,27 @@ void Tension_controlTask( void *Process)
 
     if( target_tension > sensor0Value)
     {
-      digitalWrite( DIRL, force1_control_signal > 0 ? HIGH : LOW); //適宜変更する(> or <)
+      digitalWrite( SLPL, HIGH);
+      digitalWrite( DIRL, LOW); //適宜変更する(> or <)
+      ledcWrite( PWML, pwm_force1);
     }else if( target_tension < sensor0Value)
     {
-      digitalWrite( DIRL, force1_control_signal > 0 ? HIGH : LOW); //適宜変更する(> or <)
+      digitalWrite( SLPL, HIGH);
+      digitalWrite( DIRL, HIGH); //適宜変更する(> or <)
+      ledcWrite( PWML, pwm_force1);
     }
 
     if( target_tension > sensor1Value)
     {
-      digitalWrite( DIRL, force1_control_signal > 0 ? HIGH : LOW); //適宜変更する(> or <)
+      digitalWrite( SLPR, HIGH);
+      digitalWrite( DIRR, LOW); //適宜変更する(> or <)
+      ledcWrite( PWMR, pwm_force2);
     }else if( target_tension < sensor1Value)
     {
-      digitalWrite( DIRR, force2_control_signal > 0 ? HIGH : LOW); //適宜変更する(> or <)
+      digitalWrite( SLPR, HIGH);
+      digitalWrite( DIRR, HIGH); //適宜変更する(> or <)
+      ledcWrite( PWMR, pwm_force2);
     }
-    ledcWrite( 0, pwm_force1);
-    ledcWrite( 1, pwm_force2);
 
     //エラー更新
     Error_force1_pre = Error_force1;
@@ -179,6 +184,8 @@ void read_uart() //確認済み
     int sensor0Index = receivedData.indexOf("sensor0");
     int sensor1Index = receivedData.indexOf("sensor1");
 
+    //Serial1.printf("sensor0: %.2f, sensor1: %.2f", tensionValues[0], tensionValues[1]);
+
     if(sensor0Index != -1 && sensor1Index != -1)
     {
       int commandIndex = receivedData.indexOf(","); //カンマの位置を取得
@@ -186,14 +193,15 @@ void read_uart() //確認済み
     {
       //sensor0の値を抽出
       sensor0Value = receivedData.substring(sensor0Index + 8, commandIndex).toFloat();
+      //sensor0Value = receivedData.substring(sensor0Index + 8).toFloat();
       //sensor1の値を抽出
       sensor1Value = receivedData.substring(sensor1Index + 8).toFloat();
-      /*
+     /*
       Serial.print("sensor0:");
       Serial.print(sensor0Value);
-      Serial.print("sensor1:");
+      Serial.print(", sensor1:");
       Serial.println(sensor1Value);
-      */
+    */
     }
     else
     {
