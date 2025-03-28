@@ -18,8 +18,8 @@ struct CAN_IDs{
 
 //データフレーム構造体
 struct CAN_Data{
-    uint8_t Profile_Velocity[4];
-    uint8_t Profile_Velocity_re[4];
+    uint8_t Profile_Velocity[4]; //2500rpm
+    uint8_t Profile_Velocity_re[4]; //-2500rpm   
     uint8_t OP3[1];
     uint8_t OP9[1];
     uint8_t OPA[1];
