@@ -218,7 +218,7 @@ void CAN_receive_task( void *Process)
 void setup() 
 {
   Serial.begin( 500000);
-  Serial1.begin( 115200, SERIAL_8N1, 18, 19);
+  Serial1.begin( 500000, SERIAL_8N1, 18, 19);
   init_HX711();
   vTaskDelay( 500 / portTICK_PERIOD_MS);
   initCAN();
@@ -253,7 +253,7 @@ void handleUARTTask( void *Process)  //PRO_CORE Thread2(動確済み)
       command();
     }
     setMode();
-    vTaskDelay(  10 / portTICK_PERIOD_MS); 
+    vTaskDelay( 2 / portTICK_PERIOD_MS); 
   }
 }
 
@@ -269,8 +269,9 @@ void handleLoadcellTask( void *Process) //ADD_CORE Thread1
        float newtons = gram * 0.00981 * calibrationFactors[i];
        tensionValues[i] = newtons; //配列に格納
       }
+      //Serial1.printf("sensor0: %.2f, sensor1: %.2f\n", tensionValues[0], tensionValues[1]);
   }
-  vTaskDelay(  10 / portTICK_PERIOD_MS); 
+  vTaskDelay( 5 / portTICK_PERIOD_MS);  
   }
 }
 
@@ -286,11 +287,11 @@ void SerialplotTask( void *Process) //ADD_CORE THread2
     {
       //Serial.printf("Current1: %.2f, Current2: %.2f, Tension1: %.2f, Tension2: %.2f\r\n", processed_current1, processed_current2, tensionValues[0], tensionValues[1]);
       Serial.printf("Torque1: %.2f, Torque2: %.2f, Tension1: %.2f, Tension2: %.2f\r\n", Torque1, Torque2, tensionValues[0], tensionValues[1]);
-      Serial1.printf("sensor0: %.2f, sensor1: %.2f\n", tensionValues[0], tensionValues[1]);
+      //Serial1.printf("sensor0: %.2f, sensor1: %.2f\n", tensionValues[0], tensionValues[1]);
       previousMillis = currentMillis;
     }
   }
-  vTaskDelay(  10 / portTICK_PERIOD_MS); 
+  vTaskDelay( 10 / portTICK_PERIOD_MS); 
   }
 }
 
@@ -685,6 +686,10 @@ void command()
       digitalWrite( LED3, LOW);
       digitalWrite( LED4, LOW);
       break;
+    
+    case 'L':
+      Serial1.printf("sensor0: %.2f, sensor1: %.2f\n", tensionValues[0], tensionValues[1]);
+    break;
 
   }
 }

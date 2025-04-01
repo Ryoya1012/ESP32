@@ -1,7 +1,7 @@
 //Experimental machine Ver.3.0
 //master
-//Motor controll , UART communication , Pluse counter
-//Date 2025-03-07
+//Motor PID controll , UART communication , Pluse counter, AutoTune
+//Date 2025-04-01
 //Author Ryoya SATO
 
 #include <Arduino.h>
@@ -15,6 +15,36 @@
 
 #define PCNT_UNIT_ENCA PCNT_UNIT_0 // エンコーダ1
 #define PCNT_UNIT_ENCB PCNT_UNIT_1 // エンコーダ2
+
+//ゲインの最適化を行う
+float T = 0.02;
+
+//PD制御
+//最適ゲイン(2025/04/01)
+float p_gain1 = 1.38;
+float i_gain1 = 0.11;
+float d_gain1 = 0.02;
+
+//最適化用のパラメータ
+float p_gain_max = 10.0;
+float p_gain_min = 0.1;
+float max_iterations = 10000; //最大調整回数 
+float sensor0_prev;
+//最適ゲイン(2025/04/01)
+float p_gain2 = 1.01;
+float i_gain2 = 0.03;
+float d_gain2 = 0.03;
+
+//システムの応答を評価するための変数
+float previous_error = 0;
+float integral = 0;
+unsigned long previous_time = 0;
+
+bool tuning_in_progress = false;
+
+float Error_force1_pre = 0, Error_force2_pre = 0;
+float force1_integral = 0, force2_integral = 0;
+float force1_derivative = 0, force2_derivative = 0;
 
 float sensor0Value, sensor1Value;
 float oldsensor0;
@@ -108,6 +138,11 @@ void command( char lan)
       Serial.println("All System stop.");
     break;
 
+    case 'K':
+      tuning_in_progress = true;
+      Serial.println("AutoTune started");
+    break;
+
     case 'M':
       Serial.println("Enter target tension : ");
       while(Serial.available()==0)
@@ -169,37 +204,17 @@ void loop() {
 
       //次のコマンド入力待ちの表示
       Serial.print("Input command : ");
+
+
+    vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 
 }
 
 void Tension_controlTask( void *Process)
 {
-  //ゲインの最適化を行う
-  float T = 0.02;
-
-  //PD制御
-  float p_gain1 = 3.0;
-  float i_gain1 = 0;
-  float d_gain1 = 0;
-
-  float p_gain2 = 0;
-  float i_gain2 = 0;
-  float d_gain2 = 0;
-
-  //システムの応答を評価するための変数
-  float previous_error = 0;
-  float integral = 0;
-  unsigned long previous_time = 0;
-
-  bool tuning_in_progress = false;
-
-  float Error_force1_pre = 0, Error_force2_pre = 0;
-  float force1_integral = 0, force2_integral = 0;
-  float force1_derivative = 0, force2_derivative = 0;
   while(1)
   {
-
   while( Setup == 0)
   {
     digitalWrite( SLPL, LOW);
@@ -226,7 +241,7 @@ void Tension_controlTask( void *Process)
     //モータ駆動この部分の調整が必要
     int pwm_force1 = constrain( abs( force1_control_signal), 0, 255);
     int pwm_force2 = constrain( abs( force2_control_signal), 0, 255);
-
+    
     if( target_tension > sensor0Value)
     {
       digitalWrite( SLPL, HIGH);
@@ -238,7 +253,7 @@ void Tension_controlTask( void *Process)
       digitalWrite( DIRL, HIGH); //適宜変更する(> or <)
       ledcWrite( PWML, pwm_force1);
     }
-    /*
+    
     if( target_tension > sensor1Value)
     {
       digitalWrite( SLPR, HIGH);
@@ -250,15 +265,137 @@ void Tension_controlTask( void *Process)
       digitalWrite( DIRR, HIGH); //適宜変更する(> or <)
       ledcWrite( PWMR, pwm_force2);
     }
-  */
+    
     //エラー更新
     Error_force1_pre = Error_force1;
-    Error_force2_pre = Error_force2;
+    Error_force2_pre = Error_force2;  
+
+    if(tuning_in_progress)
+    {
+      Serial.println("AutoTunePID running...");
+      AutoTunePID();
+    }
+    if(!tuning_in_progress)
+    {
+        Serial.print("Final P Gain:");
+        Serial.println(p_gain1);
+        Serial.print("Final I Gain:");
+        Serial.println(i_gain1);
+        Serial.print("Final D Gain");
+        Serial.println(d_gain1);
+    }
+
     vTaskDelay(2 / portTICK_PERIOD_MS);
     }
+
     vTaskDelay(2 / portTICK_PERIOD_MS);
   }
 }
+
+void AutoTunePID() {
+    Serial.println("AutoTunePID running...");
+
+    float system_response = GetSystemResponse();
+
+    float p_gain_min = 0.01, p_gain_max = 20.0;
+    float i_gain_min = 0.001, i_gain_max = 5.0;
+    float d_gain_min = 0.001, d_gain_max = 5.0;
+
+    float error = abs(target_tension - sensor0Value);
+    static float best_error = 99999;  // 最小偏差（大きな値で初期化）
+    static float best_p = 0, best_i = 0, best_d = 0;
+    static float integral = 0;
+    static float previous_error = 0;
+    static unsigned long previous_time = millis();
+    static unsigned long last_tune_time = 0;
+
+    // 直前のゲイン値
+    static float prev_p = p_gain1, prev_i = i_gain1, prev_d = d_gain1;
+
+    unsigned long current_time = millis();
+    float dt = (current_time - previous_time) / 1000.0;
+    if (dt < 0.01) return;
+
+    float derivative = (error - previous_error) / dt;
+    integral += error * dt;
+    integral = constrain(integral, -i_gain_max, i_gain_max);
+
+    unsigned long tuning_interval = 1000;
+    if (millis() - last_tune_time > tuning_interval) {
+        last_tune_time = millis();
+
+        if (error < best_error) {
+            p_gain1 += 0.1 * (1.0 - error / best_error);
+            best_error = error;
+            best_p = p_gain1;
+            best_i = i_gain1;
+            best_d = d_gain1;
+        } else {
+            p_gain1 *= 0.95;
+        }
+
+        p_gain1 = constrain(p_gain1, p_gain_min, p_gain_max);
+
+        if (system_response > 0.5) {
+            i_gain1 += 0.01 * system_response;
+            d_gain1 += 0.01 * system_response;
+        } else {
+            i_gain1 -= 0.01 * system_response;
+            d_gain1 -= 0.01 * system_response;
+        }
+
+        i_gain1 = constrain(i_gain1, i_gain_min, i_gain_max);
+        d_gain1 = constrain(d_gain1, d_gain_min, d_gain_max);
+
+        Serial.print("Updated P Gain: ");
+        Serial.println(p_gain1);
+    }
+
+    // 変化が小さくなったら終了
+    if (abs(p_gain1 - prev_p) < 0.000001 && abs(i_gain1 - prev_i) < 0.000001 && abs(d_gain1 - prev_d) < 0.000001) {
+        Serial.println("Auto-tuning converged. Stopping tuning.");
+        Setup=0;
+        return;
+    }
+
+    // ゲインの前回値を更新
+    prev_p = p_gain1;
+    prev_i = i_gain1;
+    prev_d = d_gain1;
+
+    previous_error = error;
+    previous_time = current_time;
+    sensor0_prev = sensor0Value;
+
+    Serial.println("Best Gains:");
+    Serial.print("Best P Gain: ");
+    Serial.println(best_p);
+    Serial.print("Best I Gain: ");
+    Serial.println(best_i);
+    Serial.print("Best D Gain: ");
+    Serial.println(best_d);
+}
+
+
+float GetSystemResponse()
+{
+ // read_uart();
+  float error = target_tension - sensor0Value;
+  //float Error_force2 = target_tension - sensor1Value;  
+  static float previous_error = 0;
+  static unsigned long previous_time = 0;
+
+  unsigned long current_time = millis();
+  float error_rate = ( error - previous_error) / ( current_time - previous_time);
+
+  float system_response = abs(error_rate);
+
+  previous_error = error;
+  previous_time = current_time;
+
+  return system_response;
+}
+
 
 void read_uart() //確認済み
 {

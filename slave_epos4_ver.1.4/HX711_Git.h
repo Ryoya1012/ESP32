@@ -35,7 +35,7 @@ class Reader {
   void begin();
   void beginWighoutInitialRead();
   void reset();
-  ReadState read(int sumNumber = 10);
+  ReadState read(int sumNumber = 1);
 
   int32_t* values;
   const int doutLen;

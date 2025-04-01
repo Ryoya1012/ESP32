@@ -17,8 +17,6 @@
 #define PCNT_UNIT_ENCB PCNT_UNIT_1 // エンコーダ2
 
 float sensor0Value, sensor1Value;
-float oldsensor0;
-float oldsensor1;
 float target_tension = 0;
 
 TaskHandle_t TensionControlTaskHandle = NULL; //タスクハンドル
@@ -42,10 +40,9 @@ char lan;
 
 int Setup = 0;
 int Home = 0;
-int Move = 0;
 
 //マルチスレッドのタスクハンドル格納
-TaskHandle_t Process[2];
+TaskHandle_t Process[1];
 
 void pin_set()
 {
@@ -66,59 +63,31 @@ void command( char lan)
   switch( lan)
   {
     case 'F':
-      Serial.print("Forward.");
-    break;
     case 'B':
-      Serial.print("Back.");
-    break;
     case 'E':
-      Serial.print("Left pivot turn.");
-    break;
     case 'R':
-      Serial.print("Left super pivot turn.");
-    break;
     case 'T':
-      Serial.print("Right pivot turn.");
-    break;
     case 'Y':
-      Serial.print("Right super pivot turn.");
-    break;
     case 'S':
-      Serial.print("Stop.");
+      Serial1.print( lan);
     break;
 
     case 'Z': //目標履帯張力にする初期動作
       Home = 0;
       Setup = 1;
-      Move = 0;
       Serial.println("Tension control start.");
     break;
 
     case 'H': //原点復帰
       Setup = 0;
       Home = 1;
-      Move = 0;
       Serial.println("Return to origin.");
     break;
 
     case 'P': //All stop
       Setup = 0;
       Home = 0;
-      Move = 0;
       Serial.println("All System stop.");
-    break;
-
-    case 'M':
-      Serial.println("Enter target tension : ");
-      while(Serial.available()==0)
-      {
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
-      }
-      target_tension = Serial.parseFloat(); //目標張力を設定
-      Serial.print("Target Tension reset to : ");
-      Serial.println(target_tension);
-
-      vTaskDelay(500 / portTICK_PERIOD_MS);
     break;
 
     default:
@@ -129,11 +98,11 @@ void command( char lan)
 
 void setup() {
   Serial.begin( 115200);
-  Serial1.begin( 500000, SERIAL_8N1, 18, 19);
+  Serial1.begin( 115200, SERIAL_8N1, 18, 19);
   pinMode(ENCODER2_A, INPUT_PULLUP);
   pinMode(ENCODER2_B, INPUT_PULLUP);
   setupPCNT();
-  xTaskCreatePinnedToCore( Tension_controlTask, "TensionControlTask", 8192, NULL, 2, &Process[0], 1);
+  xTaskCreatePinnedToCore( Tension_controlTask, "TensionControlTask", 8192, NULL, 0, &Process[0], 1);
   xTaskCreatePinnedToCore( moveToHomePosition, "ReturnToOriginalTask", 8192, NULL, 0, &Process[1], 0);
   pin_set();
 }
@@ -176,10 +145,10 @@ void loop() {
 void Tension_controlTask( void *Process)
 {
   //ゲインの最適化を行う
-  float T = 0.02;
+  float T = 0.002;
 
   //PD制御
-  float p_gain1 = 3.0;
+  float p_gain1 = 2.5;
   float i_gain1 = 0;
   float d_gain1 = 0;
 
@@ -218,6 +187,9 @@ void Tension_controlTask( void *Process)
     float Error_force2 = target_tension - sensor1Value;
     force1_integral += Error_force1 * T;
     force2_integral += Error_force2 * T;
+    //積分項(アンチワインドアップ制御を追加)
+    force1_integral = constrain( force1_integral, -1000, 1000);
+    force2_integral = constrain( force2_integral, -1000, 1000);
     force1_derivative = ( Error_force1 - Error_force1_pre) / T; 
     force2_derivative = ( Error_force2 - Error_force2_pre) / T;
     float force1_control_signal = p_gain1 * Error_force1 + i_gain1 * force1_integral + d_gain1 * force1_derivative;
@@ -238,7 +210,7 @@ void Tension_controlTask( void *Process)
       digitalWrite( DIRL, HIGH); //適宜変更する(> or <)
       ledcWrite( PWML, pwm_force1);
     }
-    /*
+    
     if( target_tension > sensor1Value)
     {
       digitalWrite( SLPR, HIGH);
@@ -250,7 +222,7 @@ void Tension_controlTask( void *Process)
       digitalWrite( DIRR, HIGH); //適宜変更する(> or <)
       ledcWrite( PWMR, pwm_force2);
     }
-  */
+  
     //エラー更新
     Error_force1_pre = Error_force1;
     Error_force2_pre = Error_force2;
@@ -262,7 +234,6 @@ void Tension_controlTask( void *Process)
 
 void read_uart() //確認済み
 {
-  Serial1.print("L");
   if( Serial1.available())
   {
     String receivedData = Serial1.readStringUntil('\n');
@@ -283,12 +254,12 @@ void read_uart() //確認済み
       //sensor0Value = receivedData.substring(sensor0Index + 8).toFloat();
       //sensor1の値を抽出
       sensor1Value = receivedData.substring(sensor1Index + 8).toFloat();
-  
+  /*
       Serial.print("sensor0:");
       Serial.print(sensor0Value);
       Serial.print(", sensor1:");
       Serial.println(sensor1Value);
-
+*/
     }
     else
     {
@@ -341,7 +312,7 @@ void moveToHomePosition( void *Process)
 {
   int flag1 = 0;
   int flag2 = 0;
-  float T = 0.01;
+  float T = 0.025;
   float p_gain1 = 0.2;
   float i_gain1 = 0.1;
   float d_gain1 = 0.01;
@@ -352,8 +323,6 @@ void moveToHomePosition( void *Process)
   float error1_pre = 0, error2_pre = 0;
   float position1_integral = 0, position2_integral = 0;
   float position1_derivative = 0, position2_derivative = 0; 
-
-  TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while(1)
   {
@@ -431,8 +400,8 @@ void moveToHomePosition( void *Process)
       error1_pre = error1;
       error2_pre = error2;
 
-      vTaskDelayUntil(&xLastWakeTime, 10 / portTICK_PERIOD_MS);
+      vTaskDelay(2.5 / portTICK_PERIOD_MS);
     }
-      vTaskDelayUntil(&xLastWakeTime, 10 / portTICK_PERIOD_MS);
+      vTaskDelay(2.5 / portTICK_PERIOD_MS);
   }
 }
